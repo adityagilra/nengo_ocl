@@ -306,7 +306,7 @@ class Simulator(object):
         seeds = [self.rng.randint(npext.maxint) if s is None else s
                  for s in seeds]
         cl_rngs = create_rngs(self.queue, len(seeds))
-        init_rngs(self.queue, rngs, seeds)
+        init_rngs(self.queue, cl_rngs, seeds)
         self._cl_rngs[cl_rngs] = seeds
         return cl_rngs
 
