@@ -1833,6 +1833,92 @@ def plan_bcm(queue, pre, post, theta, delta, alpha, tag=None):
                         delta.nbytes + alpha.nbytes)
     return plan
 
+def plan_inhvsg(queue, pre, post, theta, delta, learn, alpha, tag=None):
+    assert (len(pre) == len(post) == len(theta) == len(delta)
+            == alpha.size == len(learn))
+    N = len(pre)
+
+    for arr in (learn,):  # scalars
+        assert (arr.shape0s == 1).all()
+        assert (arr.shape1s == 1).all()
+    for arr in (pre, post, theta):  # vectors
+        assert (arr.shape1s == 1).all()
+    for arr in (delta,):  # matrices
+        assert (arr.stride1s == 1).all()
+
+    assert (post.shape0s == delta.shape0s).all()
+    assert (pre.shape0s == delta.shape1s).all()
+    assert (post.shape0s == theta.shape0s).all()
+
+    assert (pre.ctype == post.ctype == theta.ctype == delta.ctype ==
+            alpha.ctype == learn.ctype)
+
+    text = """
+    __kernel void inhvsg(
+        __global const int *shape0s,
+        __global const int *shape1s,
+        __global const int *pre_stride0s,
+        __global const int *pre_starts,
+        __global const ${type} *pre_data,
+        __global const int *post_stride0s,
+        __global const int *post_starts,
+        __global const ${type} *post_data,
+        __global const int *theta_stride0s,
+        __global const int *theta_starts,
+        __global const ${type} *theta_data,
+        __global const int *delta_stride0s,
+        __global const int *delta_starts,
+        __global ${type} *delta_data,
+        __global const int *learn_starts,
+        __global const ${type} *learn_data,
+        __global const ${type} *alphas
+    )
+    {
+        const int ij = get_global_id(0);
+        const int k = get_global_id(1);
+
+        const int shape0 = shape0s[k];
+        const int shape1 = shape1s[k];
+        const int i = ij / shape1;
+        const int j = ij % shape1;
+
+        __global ${type} *delta = delta_data + delta_starts[k];
+        const ${type} pre = pre_data[pre_starts[k] + j*pre_stride0s[k]];
+        const ${type} post = post_data[post_starts[k] + i*post_stride0s[k]];
+        const ${type} theta = theta_data[theta_starts[k] + i*theta_stride0s[k]];
+        const ${type} learn = learn_data[learn_starts[k]];
+        const ${type} alpha = alphas[k];
+
+        if (i < shape0) {
+            delta[i*delta_stride0s[k] + j] =
+                alpha * learn * (post - theta) * pre;
+        }
+    }
+    """
+
+    textconf = dict(type=pre.ctype)
+    text = as_ascii(Template(text, output_encoding='ascii').render(**textconf))
+
+    full_args = (
+        delta.cl_shape0s, delta.cl_shape1s,
+        pre.cl_stride0s, pre.cl_starts, pre.cl_buf,
+        post.cl_stride0s, post.cl_starts, post.cl_buf,
+        theta.cl_stride0s, theta.cl_starts, theta.cl_buf,
+        delta.cl_stride0s, delta.cl_starts, delta.cl_buf,
+        learn.cl_starts, learn.cl_buf,
+        alpha,
+    )
+    _fn = cl.Program(queue.context, text).build().inhvsg
+    _fn.set_args(*[arr.data for arr in full_args])
+
+    lsize = None
+    gsize = (delta.sizes.max(), N)
+    plan = Plan(queue, _fn, gsize, lsize=lsize, name="cl_inhsvg", tag=tag)
+    plan.full_args = full_args     # prevent garbage-collection
+    plan.flops_per_call = 4 * delta.sizes.sum()
+    plan.bw_per_call = (pre.nbytes + post.nbytes + theta.nbytes +
+                        delta.nbytes + learn.nbytes + alpha.nbytes)
+    return plan
 
 def plan_oja(queue, pre, post, weights, delta, alpha, beta, tag=None):
     assert (len(pre) == len(post) == len(weights) == len(delta) ==

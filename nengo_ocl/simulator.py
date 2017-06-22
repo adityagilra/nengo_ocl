@@ -30,7 +30,7 @@ from nengo_ocl.clra_nonlinearities import (
     plan_direct, plan_lif, plan_lif_rate, plan_rectified_linear, plan_sigmoid,
     plan_probes, plan_linearfilter, plan_elementwise_inc,
     create_rngs, init_rngs, get_dist_enums_params, plan_whitenoise,
-    plan_presentinput, plan_conv2d, plan_pool2d, plan_bcm, plan_oja, plan_voja)
+    plan_presentinput, plan_conv2d, plan_pool2d, plan_bcm, plan_oja, plan_voja, plan_inhvsg)
 from nengo_ocl.operators import MultiDotInc
 from nengo_ocl.plan import BasePlan, PythonPlan, Plans
 from nengo_ocl.planners import greedy_planner
@@ -995,6 +995,18 @@ class Simulator(object):
         delta = self.all_data[[self.sidx[op.delta] for op in ops]]
         alpha = self.Array([op.learning_rate * self.model.dt for op in ops])
         return [plan_bcm(self.queue, pre, post, theta, delta, alpha)]
+
+    def plan_SimInhVSG(self, ops):
+        # all signals, variables defined in SimInhSVG.make_step() must be defined here
+        pre = self.all_data[[self.sidx[op.pre_filtered] for op in ops]]
+        post = self.all_data[[self.sidx[op.post_filtered] for op in ops]]
+        theta = self.all_data[[self.sidx[op.theta] for op in ops]]
+        delta = self.all_data[[self.sidx[op.delta] for op in ops]]
+        learning_signal = self.all_data[
+            [self.sidx[op.learning_signal] for op in ops]]
+        alpha = self.Array([op.learning_rate * self.model.dt for op in ops])
+        return [plan_inhvsg(self.queue, pre, post, theta, delta,
+                          learning_signal, alpha)]
 
     def plan_SimOja(self, ops):
         pre = self.all_data[[self.sidx[op.pre_filtered] for op in ops]]
