@@ -658,7 +658,10 @@ class Simulator(object):
         A = self.all_data[[self.sidx[op.A] for op in ops]]
         X = self.all_data[[self.sidx[op.X] for op in ops]]
         Y = self.all_data[[self.sidx[op.Y] for op in ops]]
-        return [plan_elementwise_inc(self.queue, A, X, Y)]
+        clip_type = self.Array([op.clip_type for op in ops])
+        decay_factor = self.Array([op.decay_factor for op in ops])
+        print ("Zpre",[(op.tag,op.clip_type,op.decay_factor) for op in ops])
+        return [plan_elementwise_inc(self.queue, A, X, Y, clip_type, decay_factor)]
 
     def plan_SimPyFunc(self, ops):
         groups = groupby(ops, lambda op: op.fn)

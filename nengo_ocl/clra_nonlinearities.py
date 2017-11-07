@@ -396,9 +396,11 @@ def plan_slicedcopy(queue, A, B, Ainds, Binds, incs, tag=None):
     return plan
 
 
-def plan_elementwise_inc(queue, A, X, Y, tag=None):
+def plan_elementwise_inc(queue, A, X, Y, clip_type, decay_factor, tag=None):
     """Implements an element-wise increment Y += A * X"""
-    assert len(Y) == len(X) == len(A)
+    assert len(Y) == len(X) == len(A) == clip_type.size == decay_factor.size
+
+    #print 'Zpre',clip_type, decay_factor
 
     for arr in [A, X, Y]:
         assert (arr.stride1s == 1).all()
@@ -447,7 +449,9 @@ def plan_elementwise_inc(queue, A, X, Y, tag=None):
             __global const int *Yshape1s,
             __global const int *Ystride0s,
             __global const int *Ystarts,
-            __global ${Ytype} *Ydata
+            __global ${Ytype} *Ydata,
+            __global const ${itype} *clip_types,
+            __global const ${ftype} *decay_factors
         )
         {
             const int n = get_global_id(1);
@@ -456,20 +460,36 @@ def plan_elementwise_inc(queue, A, X, Y, tag=None):
             __global const ${Atype} *a = Adata + Astarts[n];
             __global const ${Xtype} *x = Xdata + Xstarts[n];
             __global ${Ytype} *y = Ydata + Ystarts[n];
+            const ${itype} clip_type = clip_types[n];
+            const ${ftype} decay_factor = decay_factors[n];
 
             const int Ystride0 = Ystride0s[n];
             const int Yshape0 = Yshape0s[n];
             const int Yshape1 = Yshape1s[n];
             const int i = ij / Yshape1;
             const int j = ij % Yshape1;
+            const int idx = i*Ystride0 + j;
+            ${Ytype} ytemp = 100.0;
 
             ${Atype} aa = get_element(
                 a, Ashape0s[n], Ashape1s[n], Astride0s[n], i, j);
             ${Xtype} xx = get_element(
                 x, Xshape0s[n], Xshape1s[n], Xstride0s[n], i, j);
 
-            if (i < Yshape0)
-                y[i*Ystride0 + j] += aa * xx;
+            if (i < Yshape0) {
+                ytemp = y[idx]*decay_factor + aa * xx;
+                printf("Z0. n=%d, i=%d, j=%d, clip_type %d, decay_factor %f, ytemp %f, yidx %f \\n",
+                            n,i,j,clip_type,decay_factor,ytemp,y[idx]);
+                /*if (decay_factor!=1.0) {
+                    printf("Z. clip_type %d, decay_factor %f\\n",clip_type,decay_factor);
+                    printf("A. ytemp %f, yidx %f\\n",ytemp,y[idx]);
+                }*/
+                y[idx] = ytemp
+                            - ytemp*(clip_type==1)*(ytemp<0)
+                            - ytemp*(clip_type==2)*(ytemp>0);
+                /*if (decay_factor!=1.0) {
+                    printf("B. ytemp %f, yidx %f\\n",ytemp*(clip_type==0),y[idx]);}*/
+            }
         }
         """
 
@@ -477,7 +497,8 @@ def plan_elementwise_inc(queue, A, X, Y, tag=None):
     lsize0 = get_mwgs(queue, cap=256)
     sizes, inds, offsets = blockify_ij(lsize0, Y)
 
-    textconf = dict(Atype=A.ctype, Xtype=X.ctype, Ytype=Y.ctype)
+    textconf = dict(Atype=A.ctype, Xtype=X.ctype, Ytype=Y.ctype,
+                    ftype=decay_factor.ctype, itype=clip_type.ctype)
     text = as_ascii(Template(text, output_encoding='ascii').render(**textconf))
 
     full_args = (
@@ -497,6 +518,8 @@ def plan_elementwise_inc(queue, A, X, Y, tag=None):
         to_device(queue, Y.stride0s[inds]),
         to_device(queue, Y.starts[inds]),
         Y.cl_buf,
+        clip_type,
+        decay_factor,
     )
     _fn = cl.Program(queue.context, text).build().elementwise_inc
     _fn.set_args(*[arr.data for arr in full_args])
@@ -505,8 +528,8 @@ def plan_elementwise_inc(queue, A, X, Y, tag=None):
     plan = Plan(
         queue, _fn, gsize, lsize=None, name="cl_elementwise_inc", tag=tag)
     plan.full_args = full_args     # prevent garbage-collection
-    plan.flops_per_call = 2 * Y.sizes.sum()
-    plan.bw_per_call = A.nbytes + X.nbytes + Y.nbytes
+    plan.flops_per_call = 4 * Y.sizes.sum()
+    plan.bw_per_call = A.nbytes + X.nbytes + Y.nbytes + clip_type.nbytes + decay_factor.nbytes
     plan.description = (
         "groups: %d; items: %d; items/group: %0.1f [%d, %d]" %
         (len(Y), Y.sizes.sum(), Y.sizes.mean(), Y.sizes.min(), Y.sizes.max()))
